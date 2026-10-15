@@ -1,0 +1,383 @@
+---
+title: "Cognitive Ability and Conspiracy Thinking - manuscript analyses"
+author: "Sam Agnoli"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+Phase 1: Tables 1-3, Figures 2A/2B. Phase 2: Tables 4-5. Alexithymia factor analyses: Figure 3.
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(readr)
+library(lubridate)
+library(psych)
+library(ggplot2)
+library(purrr)
+library(broom)
+
+DIR <- "G:/My Drive/Emotion Regulation and Conspiracy Thinking/Data/"
+
+# FDR-corrected (Benjamini-Hochberg) correlation matrix
+cor_fdr <- function(df, use = "pairwise") {
+  ct <- psych::corr.test(df, use = use, method = "pearson", adjust = "BH")
+  q  <- ct$p
+  q[lower.tri(q)] <- t(q)[lower.tri(q)]
+  list(r = round(ct$r, 2), q = round(q, 3), n = ct$n)
+}
+```
+
+## Phase 1: load, exclusions, scoring
+
+```{r phase1, message=FALSE, warning=FALSE}
+Raw <- read_csv(paste0(DIR, "dataphase1_5_14_25.csv"), show_col_types = FALSE)
+
+phase1 <- Raw %>%
+  filter(!is.na(suppressWarnings(as.numeric(Progress))), Status != "Survey Preview") %>%
+  mutate(Progress = as.numeric(Progress)) %>%
+  filter(Progress >= 99) %>%
+  mutate(
+    age   = as.numeric(Q241),
+    ATC5  = abs(as.numeric(EOS_1) + age - year(RecordedDate)) <= 1,
+    n_impl = (ATQ_1 == "False") + (ATQ_2 == "False") + (ATQ_3 == "True")
+  ) %>%
+  filter((ATC5 %in% TRUE & n_impl >= 2) | (is.na(ATC5) & n_impl == 3))
+
+# CRT
+phase1 <- phase1 %>%
+  mutate(CRT_4 = case_when(
+    grepl("This is a trickish question.", CRT_4) ~ "0", #ppt answers "first or second", still wrong
+    CRT_4 %in% c("sdecond", "secod") ~ "2", #typos
+    TRUE ~ CRT_4
+  ))
+
+# ERQ: expressive suppression = 2, 4, 6, 9; cognitive reappraisal = 1, 3, 5, 7, 8, 10
+# TAS-20: reverse-scored items 4, 5, 10, 18, 19 on a 1-5 scale
+TAS_rev   <- paste0("TAS20_", c(4, 5, 10, 18, 19), "_1")
+DIF_items <- paste0("TAS20_", c(1, 3, 6, 7, 9, 13, 14), "_1")
+DDF_items <- paste0("TAS20_", c(2, 4, 11, 12, 17), "_1")
+EOT_items <- paste0("TAS20_", c(5, 8, 10, 15, 16, 18, 19, 20), "_1")
+
+phase1 <- phase1 %>%
+  mutate(
+    across(c(starts_with("ERQ_"), starts_with("TAS20_")), ~ as.numeric(str_extract(.x, "^[0-9]+"))),
+    across(c(starts_with("BCTI_"), starts_with("VCB_")),  ~ as.numeric(str_extract(.x, "\\d+"))),
+    across(all_of(TAS_rev), ~ 6 - .x),
+    ERQ_ES    = rowSums(across(paste0("ERQ_", c(2, 4, 6, 9), "_1")), na.rm = TRUE),
+    ERQ_CR    = rowSums(across(paste0("ERQ_", c(1, 3, 5, 7, 8, 10), "_1")), na.rm = TRUE),
+    TAS_DIF   = rowSums(across(all_of(DIF_items)), na.rm = TRUE),
+    TAS_DDF   = rowSums(across(all_of(DDF_items)), na.rm = TRUE),
+    TAS_EOT   = rowSums(across(all_of(EOT_items)), na.rm = TRUE),
+    TAS_total = TAS_DIF + TAS_DDF + TAS_EOT,
+    BCTI_total = rowSums(across(starts_with("BCTI_")), na.rm = TRUE),
+    vaxConspiracyBelief_total = rowSums(across(starts_with("VCB_")), na.rm = TRUE),
+    CRT_total = as.integer(CRT_1 == 4) + as.integer(CRT_2 == 10) + as.integer(CRT_3 == 39) +
+      as.integer(grepl("\\b(second|2)\\b", CRT_4, ignore.case = TRUE)) +
+      as.integer(CRT_5 == 8) +
+      as.integer(grepl("emily|enily", CRT_6, ignore.case = TRUE)) + #single correct answer of "enily"
+      as.integer(CRT_7 == 0)
+  ) %>%
+  select(prolific_id = Q253, PROLIFIC_PID, Progress, EndDate,
+         age, gender = Q262, race = Q258, hispanic_latino = Q259,
+         fam_income = Q10, political_party = Q13,
+         ERQ_ES, ERQ_CR, TAS_DIF, TAS_DDF, TAS_EOT, TAS_total,
+         BCTI_total, vaxConspiracyBelief_total, CRT_total,
+         all_of(c(DIF_items, DDF_items, EOT_items)))
+
+# Phase 1 analysis sample (n = 1307)
+phase1_ids <- read.csv(paste0(DIR, "phase1_id_list.txt"), stringsAsFactors = FALSE)
+data <- phase1 %>%
+  filter(prolific_id %in% phase1_ids$prolific_id) %>%
+  arrange(desc(Progress), desc(EndDate)) %>%
+  distinct(prolific_id, .keep_all = TRUE)
+
+# Matrix reasoning (n = 1199; 108 participants did not complete the task)
+dataMR <- read_csv(paste0(DIR, "matrixScored_20251006.csv"), show_col_types = FALSE) %>%
+  select(ID, MR_total = totalScore)
+data <- data %>% left_join(dataMR, by = c("prolific_id" = "ID"))
+
+cat("Phase 1 n:", nrow(data), " with matrix reasoning:", sum(!is.na(data$MR_total)), "\n")
+```
+
+## Demographic characteristics (Phase 1)
+
+```{r demographics}
+income_map <- c("$25,000 or less" = 12500, "$25,001 - $40,000" = 32500, "$40,001 - $70,000" = 55000,
+                "$70,001 - $90,000" = 80000, "$90,001 - $120,000" = 105000, "$120,001 - $150,000" = 135000,
+                "$150,001 - $200,000" = 175000, "$200,001 - $300,000" = 250000, "$300,001 or more" = 300000)
+
+race_counts <- function(race) {
+  r <- trimws(unlist(strsplit(as.character(race), ",")))
+  table(r[r != "" & !is.na(r)])
+}
+
+cat("Age:", sprintf("M = %.2f, SD = %.2f", mean(data$age, na.rm = TRUE), sd(data$age, na.rm = TRUE)), "\n")
+cat("Gender:\n"); print(table(ifelse(data$gender %in% c("Male", "Female"), data$gender, "Other")))
+cat("Race:\n"); print(race_counts(data$race))
+cat("Hispanic/Latino:", sum(data$hispanic_latino == "Of Hispanic or Latino origin", na.rm = TRUE), "\n")
+cat("Income:", sprintf("M = %.0f, SD = %.0f", mean(income_map[trimws(data$fam_income)], na.rm = TRUE),
+                       sd(income_map[trimws(data$fam_income)], na.rm = TRUE)), "\n")
+cat("Political party:\n"); print(table(data$political_party))
+```
+
+## Table 1: conspiracy beliefs x emotion regulation
+
+```{r table1}
+tab1 <- cor_fdr(data %>% select(`General Conspiracy (BCTI)` = BCTI_total,
+                                `Vaccine Conspiracy` = vaxConspiracyBelief_total,
+                                `ERQ Reappraisal` = ERQ_CR, `ERQ Suppression` = ERQ_ES,
+                                `TAS DIF` = TAS_DIF, `TAS DDF` = TAS_DDF,
+                                `TAS EOT` = TAS_EOT, `TAS Total` = TAS_total))
+tab1$r
+tab1$q
+```
+
+## Table 2: cognitive functioning
+
+```{r table2}
+tab2 <- cor_fdr(data %>% select(`General Conspiracy (BCTI)` = BCTI_total,
+                                `Vaccine Conspiracy` = vaxConspiracyBelief_total,
+                                `Expressive Suppression (ERQ)` = ERQ_ES, `TAS Total` = TAS_total,
+                                `Matrix Reasoning` = MR_total, `CRT` = CRT_total),
+                use = "complete")
+tab2$r
+tab2$q
+```
+
+## Table 3: expressive suppression x matrix reasoning
+
+```{r table3}
+data <- data %>%
+  mutate(across(c(ERQ_ES, MR_total, BCTI_total, vaxConspiracyBelief_total),
+                ~ scale(.x)[, 1], .names = "{.col}_z"))
+
+model_bcti <- lm(BCTI_total_z ~ ERQ_ES_z * MR_total_z, data = data)
+model_vax  <- lm(vaxConspiracyBelief_total_z ~ ERQ_ES_z * MR_total_z, data = data)
+summary(model_bcti)
+summary(model_vax)
+```
+
+## Figures 2A and 2B
+
+```{r figures2, message=FALSE}
+data <- data %>%
+  mutate(MR_group = cut(MR_total_z, breaks = c(-Inf, -1, 1, Inf), labels = c("-1 SD", "Mean", "+1 SD")))
+
+mod_plot <- function(model, outcome_z, ylab) {
+  coefs  <- coef(model)
+  slopes <- coefs["ERQ_ES_z"] + coefs["ERQ_ES_z:MR_total_z"] * c(-1, 0, 1)
+  names(slopes) <- c("-1 SD", "Mean", "+1 SD")
+  pred <- expand.grid(ERQ_ES_z = seq(min(data$ERQ_ES_z), max(data$ERQ_ES_z), length.out = 200),
+                      MR_total_z = c(-1, 0, 1))
+  pred$fit <- predict(model, newdata = pred)
+  pred$MR_group <- factor(pred$MR_total_z, levels = c(-1, 0, 1), labels = c("-1 SD", "Mean", "+1 SD"))
+
+  ggplot() +
+    geom_point(data = data, aes(x = ERQ_ES_z, y = .data[[outcome_z]], color = MR_group), alpha = 0.4) +
+    geom_smooth(data = pred, aes(x = ERQ_ES_z, y = fit, color = MR_group),
+                method = "lm", se = FALSE, linewidth = 1) +
+    scale_color_manual(values = c("-1 SD" = "firebrick", "Mean" = "black", "+1 SD" = "blue"),
+                       labels = paste0(names(slopes), "  \u03b2 = ", round(slopes, 3)),
+                       na.translate = FALSE) +
+    scale_x_continuous(breaks = seq(-3, 3, by = 1)) +
+    scale_y_continuous(breaks = seq(-3, 3, by = 1)) +
+    coord_cartesian(xlim = c(-2, 2.5), ylim = c(-2, 3)) +
+    labs(x = "Expressive Suppression", y = ylab, color = "Matrix Reasoning") +
+    theme_minimal() +
+    theme(axis.title = element_text(size = 16, color = "black"),
+          axis.text = element_text(size = 14, color = "black"),
+          axis.ticks = element_line(color = "black", linewidth = 0.4),
+          axis.ticks.length = unit(0.15, "cm"),
+          axis.line = element_line(color = "black", linewidth = 0.5),
+          legend.title = element_text(size = 14),
+          legend.text = element_text(size = 12, color = "black"),
+          panel.grid.minor = element_blank(), panel.grid.major = element_blank())
+}
+
+fig2A <- mod_plot(model_bcti, "BCTI_total_z", "General Conspiracy Beliefs")
+fig2B <- mod_plot(model_vax, "vaxConspiracyBelief_total_z", "Vaccine Conspiracy Beliefs")
+fig2A
+fig2B
+```
+
+## Phase 2
+
+```{r phase2, message=FALSE}
+dataPRL <- read_csv(paste0(DIR, "PRLWideData_20251006.csv"), show_col_types = FALSE)
+
+# Phase 2 draws on everyone who passed the Phase 1 checks, not just the Phase 1
+# analysis sample; one duplicate ID removed.
+phase2_pool <- phase1 %>%
+  filter(!grepl("^([0-9a-f]{24})\\1$", prolific_id)) %>%
+  mutate(prolific_id = coalesce(str_extract(prolific_id, "[0-9a-f]{24}"),
+                                str_extract(PROLIFIC_PID, "^[0-9a-f]{24}$"), prolific_id)) %>%
+  arrange(desc(Progress), desc(EndDate)) %>%
+  distinct(prolific_id, .keep_all = TRUE)
+
+dataPRL_full <- phase2_pool %>%
+  inner_join(dataPRL %>% select(prolific_id = PROLIFIC_PID, l_sw_r, w_sw_r), by = "prolific_id")
+cat("Phase 2 n:", nrow(dataPRL_full), "\n")
+
+# Conspiracy group = top 15% of Phase 1 BCTI
+bcti_cut <- quantile(data$BCTI_total, 0.85, na.rm = TRUE)
+dataPRL_full$ESB_group <- factor(ifelse(dataPRL_full$BCTI_total >= bcti_cut, "Conspiracy", "Non-conspiracy"),
+                                 levels = c("Conspiracy", "Non-conspiracy"))
+table(dataPRL_full$ESB_group)
+```
+
+## Table 4: Phase 2 demographics
+
+```{r table4}
+demo <- function(d) {
+  income <- income_map[trimws(d$fam_income)]
+  data.frame(
+    N = nrow(d),
+    Age = sprintf("%.2f (%.2f)", mean(as.numeric(d$age)), sd(as.numeric(d$age))),
+    Gender_MFO = paste(sum(d$gender == "Male"), sum(d$gender == "Female"),
+                       sum(!d$gender %in% c("Male", "Female")), sep = ":"),
+    White = sum(grepl("White", d$race)),
+    Black = sum(grepl("Black", d$race)),
+    Other = sum(d$hispanic_latino == "Of Hispanic or Latino origin") +
+      sum(grepl("Asian|American Indian|Alaska|Hawaiian", d$race)),
+    Income = sprintf("$%s ($%s)", format(round(mean(income)), big.mark = ","),
+                     format(round(sd(income)), big.mark = ",")),
+    BCTI = sprintf("%.2f (%.2f)", mean(d$BCTI_total), sd(d$BCTI_total)),
+    VCB = sprintf("%.2f (%.2f)", mean(d$vaxConspiracyBelief_total), sd(d$vaxConspiracyBelief_total)))
+}
+table4 <- as.data.frame(t(bind_rows(
+  Conspiracy       = demo(filter(dataPRL_full, ESB_group == "Conspiracy")),
+  `Non-conspiracy` = demo(filter(dataPRL_full, ESB_group == "Non-conspiracy")),
+  Total            = demo(dataPRL_full), .id = "Group")))
+table4
+```
+
+## PRL: group differences and correlations
+
+```{r prl}
+t.test(w_sw_r ~ ESB_group, data = dataPRL_full)
+t.test(l_sw_r ~ ESB_group, data = dataPRL_full)
+
+prl_ws <- cor_fdr(dataPRL_full %>% select(`General Conspiracy (BCTI)` = BCTI_total,
+                                          `Vaccine Conspiracy` = vaxConspiracyBelief_total,
+                                          `Expressive Suppression (ERQ)` = ERQ_ES, `Win-Switch` = w_sw_r))
+prl_ls <- cor_fdr(dataPRL_full %>% select(`General Conspiracy (BCTI)` = BCTI_total,
+                                          `Vaccine Conspiracy` = vaxConspiracyBelief_total,
+                                          `Expressive Suppression (ERQ)` = ERQ_ES, `Loss-Switch` = l_sw_r))
+rbind(r = prl_ws$r["Win-Switch", ],  q = prl_ws$q["Win-Switch", ])
+rbind(r = prl_ls$r["Loss-Switch", ], q = prl_ls$q["Loss-Switch", ])
+```
+
+## Table 5: expressive suppression x switch rate
+
+```{r table5}
+prl_mod <- dataPRL_full %>%
+  mutate(ES = scale(ERQ_ES)[, 1], BCTI = scale(BCTI_total)[, 1],
+         VCB = scale(vaxConspiracyBelief_total)[, 1],
+         WS = scale(w_sw_r)[, 1], LS = scale(l_sw_r)[, 1])
+
+fit_prl <- function(outcome, prl) {
+  m1 <- lm(as.formula(paste(outcome, "~ ES +", prl)), data = prl_mod)
+  m2 <- lm(as.formula(paste(outcome, "~ ES *", prl)), data = prl_mod)
+  c1 <- coef(summary(m1)); c2 <- coef(summary(m2))
+  data.frame(Outcome = outcome, PRL = prl,
+             ES_beta = c1["ES", 1], ES_p = c1["ES", 4],
+             Switch_beta = c1[prl, 1], Switch_p = c1[prl, 4],
+             Adj_R2 = summary(m1)$adj.r.squared,
+             Int_beta = c2[paste0("ES:", prl), 1], Int_p = c2[paste0("ES:", prl), 4],
+             R2_change = summary(m2)$r.squared - summary(m1)$r.squared)
+}
+
+table5 <- bind_rows(fit_prl("BCTI", "WS"), fit_prl("VCB", "WS"),
+                    fit_prl("BCTI", "LS"), fit_prl("VCB", "LS")) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+table5
+```
+
+## Alexithymia: EFA (2 factors, maximum likelihood, oblimin)
+
+```{r efa}
+set.seed(1234)
+
+TAS_items <- c(DIF_items, DDF_items, EOT_items)
+
+tas_efa <- fa(data %>% select(all_of(TAS_items)), nfactors = 2, rotate = "oblimin", fm = "ml")
+print(tas_efa$loadings, cutoff = .30)
+tas_efa$Phi
+
+# Which factor is which: one should track DIF and DDF, the other EOT
+fscores <- as.data.frame(tas_efa$scores)
+round(cor(data %>% select(TAS_DIF, TAS_DDF, TAS_EOT), fscores), 2)
+
+# Rename after reading the correlations above
+names(fscores) <- c("EmotionAwareness_fs", "EOT_fs")
+data <- data %>%
+  select(-any_of(c("EmotionAwareness_fs", "EOT_fs", "EmotionAwareness_fs_z", "EOT_fs_z"))) %>%
+  bind_cols(fscores) %>%
+  mutate(EmotionAwareness_fs_z = as.numeric(scale(EmotionAwareness_fs)),
+         EOT_fs_z              = as.numeric(scale(EOT_fs)))
+```
+
+## Alexithymia: moderation models and bootstrap
+
+```{r alex_models}
+facets   <- c("ERQ_ES", "EmotionAwareness_fs", "EOT_fs")
+outcomes <- c("BCTI_total", "vaxConspiracyBelief_total")
+
+facet_labels <- c(ERQ_ES              = "Expressive Suppression",
+                  EmotionAwareness_fs = "Emotional Awareness",
+                  EOT_fs              = "Externally-Oriented Thinking")
+
+run_facet_model <- function(facet, outcome) {
+  f <- reformulate(paste0(facet, "_z * MR_total_z"), response = paste0(outcome, "_z"))
+  broom::tidy(lm(f, data = data), conf.int = TRUE) %>%
+    mutate(facet = facet, outcome = outcome, .before = 1)
+}
+
+facet_results <- purrr::pmap_dfr(expand_grid(facet = facets, outcome = outcomes), run_facet_model)
+
+interaction_results <- facet_results %>%
+  filter(grepl(":MR_total_z$", term)) %>%
+  select(facet, outcome, estimate, std.error, conf.low, conf.high, p.value) %>%
+  mutate(facet_label = factor(facet_labels[facet], levels = unname(facet_labels)))
+print(interaction_results, n = Inf)
+
+# Paired bootstrap: emotional awareness vs expressive suppression
+boot_diff <- function(outcome, n_boot = 2000) {
+  f_es <- reformulate("ERQ_ES_z * MR_total_z", response = paste0(outcome, "_z"))
+  f_ea <- reformulate("EmotionAwareness_fs_z * MR_total_z", response = paste0(outcome, "_z"))
+  diffs <- numeric(n_boot)
+  for (i in seq_len(n_boot)) {
+    d <- data[sample(nrow(data), replace = TRUE), ]
+    diffs[i] <- coef(lm(f_ea, data = d))[["EmotionAwareness_fs_z:MR_total_z"]] -
+                coef(lm(f_es, data = d))[["ERQ_ES_z:MR_total_z"]]
+  }
+  q <- quantile(diffs, c(.025, .5, .975))
+  tibble(outcome = outcome, diff_from_ES = q[2], ci_low = q[1], ci_high = q[3])
+}
+
+boot_results <- purrr::map_dfr(outcomes, boot_diff)
+boot_results
+```
+
+## Figure 3
+
+```{r figure3}
+fig3 <- ggplot(interaction_results, aes(x = facet_label, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_pointrange() +
+  facet_wrap(~ outcome, scales = "free_x",
+             labeller = as_labeller(c("BCTI_total" = "General Conspiracy Beliefs",
+                                      "vaxConspiracyBelief_total" = "Vaccine Conspiracy Beliefs"))) +
+  coord_flip() +
+  labs(x = NULL, y = "Standardized interaction \u03b2") +
+  theme_minimal() +
+  theme(axis.title = element_text(size = 16, color = "black"),
+        axis.text = element_text(size = 14, color = "black"),
+        strip.text = element_text(size = 14, color = "black"),
+        panel.grid.minor = element_blank())
+fig3
+```
