@@ -7,7 +7,8 @@ editor_options:
   chunk_output_type: console
 ---
 
-Phase 1: Tables 1-3, Figures 2A/2B. Phase 2: Tables 4-5. Alexithymia factor analyses: Figure 3.
+Phase 1: Tables 1-4, Figures 2A/2B. Alexithymia factor analyses: Figure 3. Phase 2: Tables 5-6.
+HGF parameter analyses (Supplementary Tables S1-S2) are in ESB_HGF_analyses.R.
 
 ```{r setup, message=FALSE, warning=FALSE}
 library(dplyr)
@@ -23,8 +24,8 @@ library(broom)
 DIR <- "G:/My Drive/Emotion Regulation and Conspiracy Thinking/Data/"
 
 # FDR-corrected (Benjamini-Hochberg) correlation matrix
-cor_fdr <- function(df, use = "pairwise") {
-  ct <- psych::corr.test(df, use = use, method = "pearson", adjust = "BH")
+cor_fdr <- function(df, use = "pairwise", method = "pearson") {
+  ct <- psych::corr.test(df, use = use, method = method, adjust = "BH")
   q  <- ct$p
   q[lower.tri(q)] <- t(q)[lower.tri(q)]
   list(r = round(ct$r, 2), q = round(q, 3), n = ct$n)
@@ -86,7 +87,9 @@ phase1 <- phase1 %>%
          fam_income = Q10, political_party = Q13,
          ERQ_ES, ERQ_CR, TAS_DIF, TAS_DDF, TAS_EOT, TAS_total,
          BCTI_total, vaxConspiracyBelief_total, CRT_total,
-         all_of(c(DIF_items, DDF_items, EOT_items)))
+         all_of(c(DIF_items, DDF_items, EOT_items)),
+         education = Q9, Duration = `Duration (in seconds)`, CRT_1:CRT_8,
+         matches("^(ERQ|BCTI|VCB)_[0-9]+_1$"))
 
 # Phase 1 analysis sample (n = 1307)
 phase1_ids <- read.csv(paste0(DIR, "phase1_id_list.txt"), stringsAsFactors = FALSE)
@@ -122,6 +125,7 @@ cat("Hispanic/Latino:", sum(data$hispanic_latino == "Of Hispanic or Latino origi
 cat("Income:", sprintf("M = %.0f, SD = %.0f", mean(income_map[trimws(data$fam_income)], na.rm = TRUE),
                        sd(income_map[trimws(data$fam_income)], na.rm = TRUE)), "\n")
 cat("Political party:\n"); print(table(data$political_party))
+cat("Education:\n"); print(table(data$education))
 ```
 
 ## Table 1: conspiracy beliefs x emotion regulation
@@ -136,9 +140,52 @@ tab1$r
 tab1$q
 ```
 
-## Table 2: cognitive functioning
+## Table 2: descriptives and reliability
 
 ```{r table2}
+crt_items <- with(data, data.frame(
+  c1 = CRT_1 == 4, c2 = CRT_2 == 10, c3 = CRT_3 == 39,
+  c4 = grepl("\\b(second|2)\\b", CRT_4, ignore.case = TRUE), c5 = CRT_5 == 8,
+  c6 = grepl("emily|enily", CRT_6, ignore.case = TRUE), c7 = CRT_7 == 0)) * 1
+
+scale_items <- list(
+  BCTI_total = grep("^BCTI_[0-9]+_1$", names(data), value = TRUE),
+  vaxConspiracyBelief_total = grep("^VCB_[0-9]+_1$", names(data), value = TRUE),
+  ERQ_CR = paste0("ERQ_", c(1, 3, 5, 7, 8, 10), "_1"),
+  ERQ_ES = paste0("ERQ_", c(2, 4, 6, 9), "_1"),
+  TAS_total = c(DIF_items, DDF_items, EOT_items),
+  TAS_DIF = DIF_items, TAS_DDF = DDF_items, TAS_EOT = EOT_items)
+
+desc <- function(x) c(M = mean(x, na.rm = TRUE), SD = sd(x, na.rm = TRUE),
+                      Min = min(x, na.rm = TRUE), Max = max(x, na.rm = TRUE))
+# KR-21 for matrix reasoning (35 items; only total scores are available)
+kr21 <- function(x, k = 35) { x <- na.omit(x); m <- mean(x); (k / (k - 1)) * (1 - m * (k - m) / (k * var(x))) }
+
+table2 <- rbind(
+  t(sapply(names(scale_items), function(v)
+    c(desc(data[[v]]), Reliability = psych::alpha(data[, scale_items[[v]]], warnings = FALSE)$total$raw_alpha))),
+  CRT_total = c(desc(data$CRT_total), Reliability = psych::alpha(crt_items, warnings = FALSE)$total$raw_alpha), # KR-20
+  MR_total  = c(desc(data$MR_total), Reliability = kr21(data$MR_total)))
+round(table2, 2)
+```
+
+## Emotion regulation: two-step regression
+
+```{r er_regression}
+er <- data %>% transmute(CR = scale(ERQ_CR)[, 1], ES = scale(ERQ_ES)[, 1], TAS = scale(TAS_total)[, 1],
+                         BCTI = scale(BCTI_total)[, 1], VCB = scale(vaxConspiracyBelief_total)[, 1])
+for (o in c("BCTI", "VCB")) {
+  step1 <- lm(as.formula(paste(o, "~ TAS + ES")), data = er)
+  step2 <- lm(as.formula(paste(o, "~ TAS + ES + CR")), data = er)
+  print(summary(step1)); print(summary(step2))
+  print(anova(step1, step2))
+  cat(o, "R2 change:", round(summary(step2)$r.squared - summary(step1)$r.squared, 3), "\n")
+}
+```
+
+## Table 3: cognitive functioning
+
+```{r table3}
 tab2 <- cor_fdr(data %>% select(`General Conspiracy (BCTI)` = BCTI_total,
                                 `Vaccine Conspiracy` = vaxConspiracyBelief_total,
                                 `Expressive Suppression (ERQ)` = ERQ_ES, `TAS Total` = TAS_total,
@@ -146,11 +193,18 @@ tab2 <- cor_fdr(data %>% select(`General Conspiracy (BCTI)` = BCTI_total,
                 use = "complete")
 tab2$r
 tab2$q
+
+# CRT x matrix reasoning by prior exposure to the CRT items (CRT_8)
+for (g in c("Yes", "No")) {
+  k <- data$CRT_8 %in% g
+  print(cor.test(data$MR_total[k], data$CRT_total[k]))
+}
+table(data$CRT_8[!is.na(data$MR_total)])
 ```
 
-## Table 3: expressive suppression x matrix reasoning
+## Table 4: expressive suppression x matrix reasoning
 
-```{r table3}
+```{r table4}
 data <- data %>%
   mutate(across(c(ERQ_ES, MR_total, BCTI_total, vaxConspiracyBelief_total),
                 ~ scale(.x)[, 1], .names = "{.col}_z"))
@@ -159,6 +213,34 @@ model_bcti <- lm(BCTI_total_z ~ ERQ_ES_z * MR_total_z, data = data)
 model_vax  <- lm(vaxConspiracyBelief_total_z ~ ERQ_ES_z * MR_total_z, data = data)
 summary(model_bcti)
 summary(model_vax)
+```
+
+## Robustness checks: completion time and demographic covariates
+
+```{r robustness}
+data$Duration <- as.numeric(data$Duration)
+for (v in c("MR_total", "BCTI_total", "vaxConspiracyBelief_total", "ERQ_ES"))
+  print(cor.test(data$Duration, data[[v]]))
+
+# Exclude participants who finished in less than half the median time
+fast <- data$Duration < 0.5 * median(data$Duration)
+cat("Excluded fast responders:", sum(fast), "\n")
+d_slow <- data[!fast, ] %>%
+  mutate(across(c(ERQ_ES, MR_total, BCTI_total, vaxConspiracyBelief_total), ~ scale(.x)[, 1]))
+summary(lm(BCTI_total ~ ERQ_ES * MR_total, data = d_slow))
+summary(lm(vaxConspiracyBelief_total ~ ERQ_ES * MR_total, data = d_slow))
+
+# Demographic covariates
+edu_levels <- c("Less than High School", "High School or equivalent", "Associate degree",
+                "Bachelor's degree", "Master's degree", "Doctorate degree")
+d_cov <- data %>% mutate(
+  gender3 = factor(ifelse(gender %in% c("Male", "Female"), gender, "Other"), levels = c("Female", "Male", "Other")),
+  edu_z   = scale(match(education, edu_levels) - 1)[, 1],
+  inc_z   = scale(income_map[trimws(fam_income)])[, 1],
+  age_z   = scale(age)[, 1],
+  party   = relevel(factor(ifelse(political_party %in% c("Democrat", "Republican"), political_party, "Other")), "Democrat"))
+summary(lm(BCTI_total_z ~ ERQ_ES_z * MR_total_z + age_z + gender3 + edu_z + inc_z + party, data = d_cov))
+summary(lm(vaxConspiracyBelief_total_z ~ ERQ_ES_z * MR_total_z + age_z + gender3 + edu_z + inc_z + party, data = d_cov))
 ```
 
 ## Figures 2A and 2B
@@ -202,6 +284,13 @@ fig2A <- mod_plot(model_bcti, "BCTI_total_z", "General Conspiracy Beliefs")
 fig2B <- mod_plot(model_vax, "vaxConspiracyBelief_total_z", "Vaccine Conspiracy Beliefs")
 fig2A
 fig2B
+
+# Figure notes: group sizes and simple slopes (95% CI) at -1 SD, mean, +1 SD of matrix reasoning
+table(data$MR_group)
+for (m in list(BCTI = model_bcti, VCB = model_vax)) for (at in c(-1, 0, 1)) {
+  refit <- update(m, data = mutate(data, MR_total_z = MR_total_z - at))
+  print(cbind(MR_at = at, coef(summary(refit))["ERQ_ES_z", , drop = FALSE], confint(refit)["ERQ_ES_z", , drop = FALSE]))
+}
 ```
 
 ## Phase 2
@@ -229,9 +318,9 @@ dataPRL_full$ESB_group <- factor(ifelse(dataPRL_full$BCTI_total >= bcti_cut, "Co
 table(dataPRL_full$ESB_group)
 ```
 
-## Table 4: Phase 2 demographics
+## Table 5: Phase 2 demographics
 
-```{r table4}
+```{r table5}
 demo <- function(d) {
   income <- income_map[trimws(d$fam_income)]
   data.frame(
@@ -245,56 +334,71 @@ demo <- function(d) {
       sum(grepl("Asian|American Indian|Alaska|Hawaiian", d$race)),
     Income = sprintf("$%s ($%s)", format(round(mean(income)), big.mark = ","),
                      format(round(sd(income)), big.mark = ",")),
-    BCTI = sprintf("%.2f (%.2f)", mean(d$BCTI_total), sd(d$BCTI_total)),
+    BA_or_higher = sum(d$education %in% c("Bachelor's degree", "Master's degree", "Doctorate degree", "Professional degree")),
+    Party_DRO = paste(sum(d$political_party == "Democrat"), sum(d$political_party == "Republican"),
+                      sum(!d$political_party %in% c("Democrat", "Republican")), sep = ":"),
+    BCTI =sprintf("%.2f (%.2f)", mean(d$BCTI_total), sd(d$BCTI_total)),
     VCB = sprintf("%.2f (%.2f)", mean(d$vaxConspiracyBelief_total), sd(d$vaxConspiracyBelief_total)))
 }
-table4 <- as.data.frame(t(bind_rows(
+table5 <- as.data.frame(t(bind_rows(
   Conspiracy       = demo(filter(dataPRL_full, ESB_group == "Conspiracy")),
   `Non-conspiracy` = demo(filter(dataPRL_full, ESB_group == "Non-conspiracy")),
   Total            = demo(dataPRL_full), .id = "Group")))
-table4
+table5
 ```
 
 ## PRL: group differences and correlations
 
 ```{r prl}
-t.test(w_sw_r ~ ESB_group, data = dataPRL_full)
-t.test(l_sw_r ~ ESB_group, data = dataPRL_full)
+# Loss-stay = proportion of trials staying with a deck after a loss (= 1 - loss-switch)
+dataPRL_full$l_st_r <- 1 - dataPRL_full$l_sw_r
 
+t.test(w_sw_r ~ ESB_group, data = dataPRL_full)
+t.test(l_st_r ~ ESB_group, data = dataPRL_full)
+
+# Spearman's rho, FDR within each set
 prl_ws <- cor_fdr(dataPRL_full %>% select(`General Conspiracy (BCTI)` = BCTI_total,
                                           `Vaccine Conspiracy` = vaxConspiracyBelief_total,
-                                          `Expressive Suppression (ERQ)` = ERQ_ES, `Win-Switch` = w_sw_r))
+                                          `Expressive Suppression (ERQ)` = ERQ_ES, `Win-Switch` = w_sw_r),
+                  method = "spearman")
 prl_ls <- cor_fdr(dataPRL_full %>% select(`General Conspiracy (BCTI)` = BCTI_total,
                                           `Vaccine Conspiracy` = vaxConspiracyBelief_total,
-                                          `Expressive Suppression (ERQ)` = ERQ_ES, `Loss-Switch` = l_sw_r))
-rbind(r = prl_ws$r["Win-Switch", ],  q = prl_ws$q["Win-Switch", ])
-rbind(r = prl_ls$r["Loss-Switch", ], q = prl_ls$q["Loss-Switch", ])
+                                          `Expressive Suppression (ERQ)` = ERQ_ES, `Loss-Stay` = l_st_r),
+                  method = "spearman")
+rbind(rho = prl_ws$r["Win-Switch", ], q = prl_ws$q["Win-Switch", ])
+rbind(rho = prl_ls$r["Loss-Stay", ],  q = prl_ls$q["Loss-Stay", ])
 ```
 
-## Table 5: expressive suppression x switch rate
+## Table 6: expressive suppression x switch rate
 
-```{r table5}
+```{r table6}
 prl_mod <- dataPRL_full %>%
-  mutate(ES = scale(ERQ_ES)[, 1], BCTI = scale(BCTI_total)[, 1],
+  mutate(ES = scale(ERQ_ES)[, 1], TAS = scale(TAS_total)[, 1], BCTI = scale(BCTI_total)[, 1],
          VCB = scale(vaxConspiracyBelief_total)[, 1],
-         WS = scale(w_sw_r)[, 1], LS = scale(l_sw_r)[, 1])
+         WS = scale(w_sw_r)[, 1], LS = scale(l_st_r)[, 1])
 
-fit_prl <- function(outcome, prl) {
-  m1 <- lm(as.formula(paste(outcome, "~ ES +", prl)), data = prl_mod)
-  m2 <- lm(as.formula(paste(outcome, "~ ES *", prl)), data = prl_mod)
+fit_prl <- function(outcome, prl, er = "ES") {
+  m1 <- lm(as.formula(paste(outcome, "~", er, "+", prl)), data = prl_mod)
+  m2 <- lm(as.formula(paste(outcome, "~", er, "*", prl)), data = prl_mod)
   c1 <- coef(summary(m1)); c2 <- coef(summary(m2))
-  data.frame(Outcome = outcome, PRL = prl,
-             ES_beta = c1["ES", 1], ES_p = c1["ES", 4],
+  data.frame(Outcome = outcome, PRL = prl, ER = er,
+             ER_beta = c1[er, 1], ER_p = c1[er, 4],
              Switch_beta = c1[prl, 1], Switch_p = c1[prl, 4],
              Adj_R2 = summary(m1)$adj.r.squared,
-             Int_beta = c2[paste0("ES:", prl), 1], Int_p = c2[paste0("ES:", prl), 4],
+             Int_beta = c2[paste0(er, ":", prl), 1], Int_p = c2[paste0(er, ":", prl), 4],
              R2_change = summary(m2)$r.squared - summary(m1)$r.squared)
 }
 
-table5 <- bind_rows(fit_prl("BCTI", "WS"), fit_prl("VCB", "WS"),
+table6 <- bind_rows(fit_prl("BCTI", "WS"), fit_prl("VCB", "WS"),
                     fit_prl("BCTI", "LS"), fit_prl("VCB", "LS")) %>%
   mutate(across(where(is.numeric), ~ round(.x, 3)))
-table5
+table6
+
+# Same models with TAS total in place of expressive suppression (Supplementary Table S3)
+tableS3 <- bind_rows(fit_prl("BCTI", "WS", "TAS"), fit_prl("VCB", "WS", "TAS"),
+                     fit_prl("BCTI", "LS", "TAS"), fit_prl("VCB", "LS", "TAS")) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+tableS3
 ```
 
 ## Alexithymia: EFA (2 factors, maximum likelihood, oblimin)
